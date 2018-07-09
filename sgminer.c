@@ -71,6 +71,12 @@ char *curly = ":D";
   #include <sys/wait.h>
 #endif
 
+char devpath[512];
+int devbaud = 115200;
+int devtimeout = 1;
+
+int fd;
+
 float (*gpu_temp)(int);
 int (*gpu_engineclock)(int);
 int (*gpu_memclock)(int);
@@ -1376,8 +1382,19 @@ char *set_difficulty_multiplier(char *arg)
   return NULL;
 }
 
+static char *set_com_port(char *arg)
+{
+	sprintf(devpath, "\\\\.\\%s", arg);
+	applog(LOG_WARNING, "Setting devpath to: %s\n", devpath);
+	return NULL;
+}
+
 /* These options are available from config file or commandline */
 struct opt_table opt_config_table[] = {
+	OPT_WITH_ARG("--com",
+	set_com_port, NULL, NULL,
+	"Set COM port for FPGA"),
+
   OPT_WITH_ARG("--algorithm|--kernel|-k",
          set_default_algorithm, NULL, NULL,
          "Set mining algorithm and most common defaults, default: scrypt"),

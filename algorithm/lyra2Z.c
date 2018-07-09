@@ -56,21 +56,70 @@ be32enc_vect(uint32_t *dst, const uint32_t *src, uint32_t len)
 
 inline void lyra2Zhash(void *state, const void *input)
 {
-    sph_blake256_context     ctx_blake;
- 
-    uint32_t hashA[8], hashB[8];
+	sph_blake256_context     ctx_blake;
 
-    sph_blake256_init(&ctx_blake);
-    sph_blake256 (&ctx_blake, input, 80);
-    sph_blake256_close (&ctx_blake, hashA);
+	uint32_t hashA[8], hashB[8];
 
-//	printf("cpu hashA %08x %08x %08x %08x  %08x %08x %08x %08x\n",
-//		hashA[0], hashA[1], hashA[2], hashA[3], hashA[4], hashA[5], hashA[6], hashA[7]);
+	sph_blake256_init(&ctx_blake);
+	sph_blake256(&ctx_blake, input, 80);
+	sph_blake256_close(&ctx_blake, hashA);
+
+	//	printf("cpu hashA %08x %08x %08x %08x  %08x %08x %08x %08x\n",
+	//		hashA[0], hashA[1], hashA[2], hashA[3], hashA[4], hashA[5], hashA[6], hashA[7]);
 
 	LYRA2(hashB, 32, hashA, 32, hashA, 32, 8, 8, 8);
 
-//printf("cpu hashB %08x %08x %08x %08x  %08x %08x %08x %08x\n",
-//hashB[0],hashB[1],hashB[2],hashB[3], hashB[4], hashB[5], hashB[6], hashB[7]);
+	//printf("cpu hashB %08x %08x %08x %08x  %08x %08x %08x %08x\n",
+	//hashB[0],hashB[1],hashB[2],hashB[3], hashB[4], hashB[5], hashB[6], hashB[7]);
+
+	memcpy(state, hashB, 32);
+}
+
+inline void lyra2Zhash2(void *state, const void *input)
+{
+	sph_blake256_context     ctx_blake, lyra2z_blake_mid;
+
+	uint32_t hashA[8], hashB[8];
+
+	char *ob_hex = bin2hex((unsigned char *)input, 80);
+	applog(LOG_ERR, "lyra2Zhash2: input: %s", ob_hex);
+	free(ob_hex);
+
+
+	sph_blake256_init(&ctx_blake);
+	sph_blake256(&ctx_blake, input, 80);
+	sph_blake256_close(&ctx_blake, hashA);
+
+	ob_hex = bin2hex((unsigned char *)hashA, 32);
+	applog(LOG_ERR, "lyra2Zhash2: blake hash: %s", ob_hex);
+	free(ob_hex);
+
+	//	printf("cpu hashA %08x %08x %08x %08x  %08x %08x %08x %08x\n",
+	//		hashA[0], hashA[1], hashA[2], hashA[3], hashA[4], hashA[5], hashA[6], hashA[7]);
+
+
+	sph_blake256_init(&lyra2z_blake_mid);
+	sph_blake256(&lyra2z_blake_mid, input, 64);
+
+	ob_hex = bin2hex((unsigned char *)&lyra2z_blake_mid.H[0], 32);
+	applog(LOG_ERR, "lyra2Zhash2: blake mids: %s", ob_hex);
+	free(ob_hex);
+
+	sph_blake256(&lyra2z_blake_mid, (unsigned char *)input + 64, 16);
+	sph_blake256_close(&lyra2z_blake_mid, hashA);
+
+	ob_hex = bin2hex((unsigned char *)hashA, 32);
+	applog(LOG_ERR, "lyra2Zhash2: blake hash: %s", ob_hex);
+	free(ob_hex);
+
+	LYRA2(hashB, 32, hashA, 32, hashA, 32, 8, 8, 8);
+
+	ob_hex = bin2hex((unsigned char *)hashB, 32);
+	applog(LOG_ERR, "lyra2Zhash2: lyra2 hash: %s", ob_hex);
+	free(ob_hex);
+
+	//printf("cpu hashB %08x %08x %08x %08x  %08x %08x %08x %08x\n",
+	//hashB[0],hashB[1],hashB[2],hashB[3], hashB[4], hashB[5], hashB[6], hashB[7]);
 
 	memcpy(state, hashB, 32);
 }
@@ -89,7 +138,7 @@ int lyra2Z_test(unsigned char *pdata, const unsigned char *ptarget, uint32_t non
 	lyra2Zhash(ohash, data);
 	tmp_hash7 = be32toh(ohash[7]);
 
-	applog(LOG_DEBUG, "htarget %08lx diff1 %08lx hash %08lx",
+	applog(LOG_ERR, "htarget %08lx diff1 %08lx hash %08lx",
 				(long unsigned int)Htarg,
 				(long unsigned int)diff1targ,
 				(long unsigned int)tmp_hash7);
@@ -108,6 +157,7 @@ void lyra2Z_regenhash(struct work *work)
 
         be32enc_vect(data, (const uint32_t *)work->data, 19);
         data[19] = htobe32(*nonce);
+
         lyra2Zhash(ohash, data);
 }
 

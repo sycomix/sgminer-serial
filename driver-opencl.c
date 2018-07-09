@@ -1174,526 +1174,510 @@ out:
   return NULL;
 }
 
-static void opencl_detect(void)
+/*****************************************************************************************/
+
+int serial_open(const char *devpath, unsigned long baud, signed short timeout, bool purge)
 {
-  int i;
+#ifdef WIN32
+	HANDLE hSerial = CreateFile(devpath, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
 
-  nDevs = clDevicesNum();
-  if (nDevs < 0) {
-    applog(LOG_ERR, "clDevicesNum returned error, no GPUs usable");
-    nDevs = 0;
-  }
+	if (unlikely(hSerial == INVALID_HANDLE_VALUE))
+	{
+		DWORD e = GetLastError();
+		switch (e) {
+		case ERROR_ACCESS_DENIED:
+			applog(LOG_ERR, "Do not have user privileges required to open %s", devpath);
+			break;
+		case ERROR_SHARING_VIOLATION:
+			applog(LOG_ERR, "%s is already in use by another process", devpath);
+			break;
+		case ERROR_FILE_NOT_FOUND:
+			applog(LOG_ERR, "Device %s not found", devpath);
+			break;
+		default:
+			applog(LOG_DEBUG, "Open %s failed, GetLastError:%d", devpath, (int)e);
+			break;
+		}
+		return -1;
+	}
 
-  if (!nDevs)
-    return;
+	// thanks to af_newbie for pointers about this
+	COMMCONFIG comCfg = { 0 };
+	comCfg.dwSize = sizeof(COMMCONFIG);
+	comCfg.wVersion = 1;
+	comCfg.dcb.DCBlength = sizeof(DCB);
+	comCfg.dcb.BaudRate = baud;
+	comCfg.dcb.fBinary = 1;
+	comCfg.dcb.fDtrControl = DTR_CONTROL_ENABLE;
+	comCfg.dcb.fRtsControl = RTS_CONTROL_ENABLE;
+	comCfg.dcb.ByteSize = 8;
 
-  /* If opt_g_threads is not set, use default 1 thread */
-  if (opt_g_threads == -1)
-    opt_g_threads = 1;
+	SetCommConfig(hSerial, &comCfg, sizeof(comCfg));
 
-  opencl_drv.max_diff = 65536;
+	// Code must specify a valid timeout value (0 means don't timeout)
+	//	const DWORD ctoms = (timeout * 100);
+	const DWORD ctoms = (1 * 100);
+	COMMTIMEOUTS cto = { ctoms, 1, ctoms, 1, ctoms };
+	SetCommTimeouts(hSerial, &cto);
 
-  for (i = 0; i < nDevs; ++i) {
-    struct cgpu_info *cgpu;
+	// Configure Windows to Monitor the serial device for Character Reception
+	SetCommMask(hSerial, EV_RXCHAR);
 
-    cgpu = &gpus[i];
-    cgpu->deven = DEV_ENABLED;
-    cgpu->drv = &opencl_drv;
-    cgpu->thr = NULL;
-    cgpu->device_id = i;
-#ifndef HAVE_ADL
-    cgpu->threads = opt_g_threads;
+	if (purge) {
+		PurgeComm(hSerial, PURGE_RXABORT);
+		PurgeComm(hSerial, PURGE_TXABORT);
+		PurgeComm(hSerial, PURGE_RXCLEAR);
+		PurgeComm(hSerial, PURGE_TXCLEAR);
+	}
+
+	return _open_osfhandle((intptr_t)hSerial, 0);
 #else
-    if (cgpu->threads < 1)
-      cgpu->threads = 1;
+	int fdDev = open(devpath, O_RDWR | O_CLOEXEC | O_NOCTTY);
+
+	if (unlikely(fdDev == -1))
+	{
+		if (errno == EACCES)
+			applog(LOG_ERR, "Do not have user privileges required to open %s", devpath);
+		else
+			applog(LOG_DEBUG, "Open %s failed, errno:%d", devpath, errno);
+
+		return -1;
+	}
+
+	struct termios my_termios;
+
+	tcgetattr(fdDev, &my_termios);
+
+#ifdef TERMIOS_DEBUG
+	termios_debug(devpath, &my_termios, "before");
 #endif
-    cgpu->virtual_gpu = i;
-    cgpu->algorithm = default_profile.algorithm;
-    add_cgpu(cgpu);
-  }
-  
-  if(!init_sysfs_hwcontrols(nDevs) && !opt_noadl) {
-    init_adl(nDevs);
-  }
-}
 
-static void reinit_opencl_device(struct cgpu_info *gpu)
-{
-  tq_push(control_thr[gpur_thr_id].q, gpu);
-}
+	switch (baud) {
+	case 0:
+		break;
+	case 19200:
+		cfsetispeed(&my_termios, B19200);
+		cfsetospeed(&my_termios, B19200);
+		break;
+	case 38400:
+		cfsetispeed(&my_termios, B38400);
+		cfsetospeed(&my_termios, B38400);
+		break;
+	case 57600:
+		cfsetispeed(&my_termios, B57600);
+		cfsetospeed(&my_termios, B57600);
+		break;
+	case 115200:
+		cfsetispeed(&my_termios, B115200);
+		cfsetospeed(&my_termios, B115200);
+		break;
+		// TODO: try some higher speeds with the Icarus and BFL to see
+		// if they support them and if setting them makes any difference
+		// N.B. B3000000 doesn't work on Icarus
+	default:
+		applog(LOG_WARNING, "Unrecognized baud rate: %lu", baud);
+	}
 
-static void get_opencl_statline_before(char *buf, size_t bufsiz, struct cgpu_info *gpu)
-{
-  if (gpu->has_adl || gpu->has_sysfs_hwcontrols) {
-    int gpuid = gpu->device_id;
-    float gt = gpu_temp(gpuid);
-    int gf = gpu_fanspeed(gpuid);
-    int gp;
+	my_termios.c_cflag &= ~(CSIZE | PARENB);
+	my_termios.c_cflag |= CS8;
+	my_termios.c_cflag |= CREAD;
+	my_termios.c_cflag |= CLOCAL;
 
-    if (gt != -1)
-      tailsprintf(buf, bufsiz, "%5.1fC ", gt);
-    else
-      tailsprintf(buf, bufsiz, "       ");
-    if (gf != -1)
-      // show invalid as 9999
-      tailsprintf(buf, bufsiz, "%4dRPM ", gf > 9999 ? 9999 : gf);
-    else if ((gp = gpu_fanpercent(gpuid)) != -1)
-      tailsprintf(buf, bufsiz, "%3d%%    ", gp);
-    else
-      tailsprintf(buf, bufsiz, "        ");
-    tailsprintf(buf, bufsiz, "| ");
-  }
-  else
-    gpu->drv->get_statline_before = &blank_get_statline_before;
-}
+	my_termios.c_iflag &= ~(IGNBRK | BRKINT | PARMRK |
+		ISTRIP | INLCR | IGNCR | ICRNL | IXON);
+	my_termios.c_oflag &= ~OPOST;
+	my_termios.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
 
-static void get_opencl_statline(char *buf, size_t bufsiz, struct cgpu_info *gpu)
-{
-  if (gpu->rawintensity > 0)
-    tailsprintf(buf, bufsiz, " rI:%3d", gpu->rawintensity);
-  else if (gpu->xintensity > 0)
-    tailsprintf(buf, bufsiz, " xI:%3d", gpu->xintensity);
-  else
-    tailsprintf(buf, bufsiz, " I:%2d", gpu->intensity);
-}
+	// Code must specify a valid timeout value (0 means don't timeout)
+	my_termios.c_cc[VTIME] = (cc_t)timeout;
+	my_termios.c_cc[VMIN] = 0;
 
-struct opencl_thread_data {
-  cl_int(*queue_kernel_parameters)(_clState *, dev_blk_ctx *, cl_uint);
-  uint32_t *res;
-};
-
-static uint32_t *blank_res;
-
-static bool opencl_thread_prepare(struct thr_info *thr)
-{
-  char name[256];
-  struct timeval now;
-  struct cgpu_info *cgpu = thr->cgpu;
-  int gpu = cgpu->device_id;
-  int virtual_gpu = cgpu->virtual_gpu;
-  int i = thr->id;
-  static bool failmessage = false;
-  int buffersize = BUFFERSIZE;
-
-  if (!blank_res)
-    blank_res = (uint32_t *)calloc(buffersize, 1);
-  if (!blank_res) {
-    applog(LOG_ERR, "Failed to calloc in opencl_thread_init");
-    return false;
-  }
-
-  strcpy(name, "");
-  applog(LOG_INFO, "Init GPU thread %i GPU %i virtual GPU %i", i, gpu, virtual_gpu);
-
-  clStates[i] = initCl(virtual_gpu, name, sizeof(name), &cgpu->algorithm);
-  if (!clStates[i]) {
-#ifdef HAVE_CURSES
-    if (use_curses)
-      enable_curses();
+#ifdef TERMIOS_DEBUG
+	termios_debug(devpath, &my_termios, "settings");
 #endif
-    applog(LOG_ERR, "Failed to init GPU thread %d, disabling device %d", i, gpu);
-    if (!failmessage) {
-      applog(LOG_ERR, "Restarting the GPU from the menu will not fix this.");
-      applog(LOG_ERR, "Re-check your configuration and try restarting.");
-      failmessage = true;
-#ifdef HAVE_CURSES
-      char *buf;
-      if (use_curses) {
-        buf = curses_input("Press enter to continue");
-        if (buf)
-          free(buf);
-      }
+
+	tcsetattr(fdDev, TCSANOW, &my_termios);
+
+#ifdef TERMIOS_DEBUG
+	tcgetattr(fdDev, &my_termios);
+	termios_debug(devpath, &my_termios, "after");
 #endif
-    }
-    cgpu->deven = DEV_DISABLED;
-    cgpu->status = LIFE_NOSTART;
 
-    dev_error(cgpu, REASON_DEV_NOSTART);
-
-    return false;
-  }
-  if (!cgpu->name)
-    cgpu->name = strdup(name);
-
-  applog(LOG_INFO, "initCl() finished. Found %s", name);
-  cgtime(&now);
-  get_datestamp(cgpu->init, sizeof(cgpu->init), &now);
-
-  return true;
+	if (purge)
+		tcflush(fdDev, TCIOFLUSH);
+	return fdDev;
+#endif
 }
 
-static bool opencl_thread_init(struct thr_info *thr)
+size_t _serial_read(int fd, char *buf, size_t bufsiz, char *eol)
 {
-  const int thr_id = thr->id;
-  struct cgpu_info *gpu = thr->cgpu;
-  struct opencl_thread_data *thrdata;
-  _clState *clState = clStates[thr_id];
-  cl_int status = 0;
-  thrdata = (struct opencl_thread_data *)calloc(1, sizeof(*thrdata));
-  thr->cgpu_data = thrdata;
-
-  if (!thrdata) {
-    applog(LOG_ERR, "Failed to calloc in opencl_thread_init");
-    return false;
-  }
-
-  thrdata->queue_kernel_parameters = gpu->algorithm.queue_kernel;
-  thrdata->res = (uint32_t *)calloc(BUFFERSIZE, 1);
-
-  if (!thrdata->res) {
-    free(thrdata);
-    applog(LOG_ERR, "Failed to calloc in opencl_thread_init");
-    return false;
-  }
-
-  status |= clEnqueueWriteBuffer(clState->commandQueue, clState->outputBuffer, CL_TRUE, 0,
-    BUFFERSIZE, blank_res, 0, NULL, NULL);
-  if (unlikely(status != CL_SUCCESS)) {
-    free(thrdata->res);
-    free(thrdata);
-    applog(LOG_ERR, "Error: clEnqueueWriteBuffer failed (opencl_thread_init) (status = %d).", status);
-    return false;
-  }
-
-  gpu->status = LIFE_WELL;
-
-  gpu->device_last_well = time(NULL);
-
-  return true;
+	size_t len, tlen = 0;
+	while (bufsiz) {
+		len = _read(fd, buf, eol ? 1 : bufsiz);
+		if (unlikely(len == -1))
+			break;
+		tlen += len;
+		if (eol && *eol == buf[0])
+			break;
+		buf += len;
+		bufsiz -= len;
+	}
+	return tlen;
 }
 
-static bool opencl_prepare_work(struct thr_info __maybe_unused *thr, struct work *work)
+int serial_recv(int fd, char *buf, size_t bufsize, size_t *readlen)
 {
-  work->blk.work = work;
-  if (work->pool->algorithm.precalc_hash)
-    work->pool->algorithm.precalc_hash(&work->blk, 0, (uint32_t *)(work->data));
-  thr->pool_no = work->pool->pool_no;
+	BOOL Status;
+	DWORD dwEventMask = 0;
+	const HANDLE fh = (HANDLE)_get_osfhandle(fd);
 
-  return true;
+	/*	Status = WaitCommEvent(fh, &dwEventMask, NULL); //Wait for the character to be received
+
+	if (Status == FALSE) {
+	printf("\n    Error! in Setting WaitCommEvent()");
+	return(-1);
+	}*/
+
+	DWORD NoBytesRead = 0;
+	char TempChar;
+	int len = 0;
+
+	do {
+		Status = ReadFile(fh, &TempChar, sizeof(TempChar), &NoBytesRead, NULL);
+
+		buf[len++] = TempChar;
+
+		if (len == bufsize)
+			break;
+
+	} while (NoBytesRead > 0);
+
+	*readlen = (size_t)len;
+	return(0);
 }
 
-
-extern int opt_dynamic_interval;
-
-static int64_t opencl_scanhash(struct thr_info *thr, struct work *work,
-  int64_t __maybe_unused max_nonce)
+//add one fpga manually for now
+static void fpga_detect(void)
 {
-  const int thr_id = thr->id;
-  struct opencl_thread_data *thrdata = (struct opencl_thread_data *)thr->cgpu_data;
-  struct cgpu_info *gpu = thr->cgpu;
-  _clState *clState = clStates[thr_id];
-  const int dynamic_us = opt_dynamic_interval * 1000;
+	struct cgpu_info *cgpu;
 
-  cl_int status;
-  size_t globalThreads[1];
-  size_t localThreads[1] = { clState->wsize };
-  size_t *p_global_work_offset = NULL;
-  int64_t hashes;
-  int found = gpu->algorithm.found_idx;
-  int buffersize = BUFFERSIZE;
-  unsigned int i;
+	opt_g_threads = 1;
 
-  /* Windows' timer resolution is only 15ms so oversample 5x */
-  if (gpu->dynamic && (++gpu->intervals * dynamic_us) > 70000) {
-    struct timeval tv_gpuend;
-    double gpu_us;
+	opencl_drv.max_diff = 65536;
 
-    cgtime(&tv_gpuend);
-    gpu_us = us_tdiff(&tv_gpuend, &gpu->tv_gpustart) / gpu->intervals;
-    if (gpu_us > dynamic_us) {
-      if (gpu->intensity > MIN_INTENSITY)
-        --gpu->intensity;
-    }
-    else if (gpu_us < dynamic_us / 2) {
-      if (gpu->intensity < MAX_INTENSITY)
-        ++gpu->intensity;
-    }
-    memcpy(&(gpu->tv_gpustart), &tv_gpuend, sizeof(struct timeval));
-    gpu->intervals = 0;
-  }
-
-  set_threads_hashes(clState->vwidth, clState->compute_shaders, &hashes, globalThreads, localThreads[0],
-    &gpu->intensity, &gpu->xintensity, &gpu->rawintensity, &gpu->algorithm);
-  if (hashes > gpu->max_hashes)
-    gpu->max_hashes = hashes;
-
-  if (gpu->algorithm.type == ALGO_EQUIHASH) {
-    int64_t ret = 0;
-    size_t length = sizeof(sols_t);
-    uint64_t t0 = time(NULL);
-    uint8_t prev_hash[32];
-    size_t txns;
-    bool stale = true;
-    
-    if (work->getwork_mode != GETWORK_MODE_STRATUM) {
-      cg_rlock(&work->pool->gbt_lock);
-      txns = work->pool->gbt_txns;
-      memcpy(prev_hash, work->pool->previousblockhash, 32);
-      cg_runlock(&work->pool->gbt_lock);
-    }
-    
-    thrdata->res = (uint32_t*)realloc(thrdata->res, length);
-    sols_t *sols = (sols_t*) thrdata->res;
-    work->thr = thr;
-    do {
-      status = thrdata->queue_kernel_parameters(clState, &work->blk, globalThreads[0]);
-      status |= clEnqueueReadBuffer(clState->commandQueue, clState->outputBuffer, CL_TRUE, 0, length, thrdata->res, 0, NULL,  NULL);
-      if (status == CL_SUCCESS) {
-        if (sols->nr > MAX_SOLS) {
-          applog(LOG_DEBUG, "equihash: %d (probably invalid) solutions were dropped!", sols->nr - MAX_SOLS);
-          sols->nr = MAX_SOLS;
-        }
-        for (int sol_i = 0; sol_i < sols->nr; sol_i++)
-          ret += equihash_verify_sol(work, sols, sol_i);
-      }
-      else {
-        applog(LOG_ERR, "Error %d: Reading result buffer for ALGO_EQUIHASH failed. (clEnqueueReadBuffer)", status);
-        return -1;
-      }
-      
-      // increase nonce
-      work->blk.nonce++;
-      if (work->getwork_mode == GETWORK_MODE_STRATUM)
-        *(uint16_t*)(work->equihash_data + 108 + strlen(work->nonce1) / 2) += 1;
-      else {
-        *(uint64_t*)(work->equihash_data + 108) += 1;
-        
-        cg_rlock(&work->pool->gbt_lock);
-        stale = (work->pool->gbt_txns != txns) || (memcmp(prev_hash, work->pool->previousblockhash, 32) != 0);
-        cg_runlock(&work->pool->gbt_lock);
-      }
-    } while (!stale && (time(NULL) - t0) < 2); 
-    return ret;
-  }
-  
-  status = thrdata->queue_kernel_parameters(clState, &work->blk, globalThreads[0]);
-  if (unlikely(status != CL_SUCCESS)) {
-    if (status > 0)
-      return 0;
-    applog(LOG_ERR, "Error: clSetKernelArg of all params failed.");
-    return -1;
-  }
-  // if (algorithm.type == ALGO_ETHASH) read lock gpu->eth_dag.lock has to be released
-  
-  if (gpu->algorithm.type == ALGO_CRYPTONIGHT) {
-	  mutex_lock(&work->pool->XMRGlobalNonceLock);
-	  work->blk.nonce = work->pool->XMRGlobalNonce;
-	  work->pool->XMRGlobalNonce += gpu->max_hashes;
-	  mutex_unlock(&work->pool->XMRGlobalNonceLock);
-  }
-  
-  if (clState->goffset)
-    p_global_work_offset = (size_t *)&work->blk.nonce;
-  
-  if (gpu->algorithm.type == ALGO_CRYPTONIGHT) {
-	  size_t GlobalThreads = *globalThreads, Nonce[2] = { (size_t)work->blk.nonce, 1 }, gthreads[2] = { *globalThreads, 8 }, lthreads[2] = { *localThreads, 8 };
-	  size_t BranchBufCount[4] = { 0, 0, 0, 0 };
-
-	  for (int i = 0; i < 4; ++i) {
-		  cl_uint zero = 0;
-
-		  status = clEnqueueWriteBuffer(clState->commandQueue, clState->BranchBuffer[i], CL_FALSE, sizeof(cl_uint) * GlobalThreads, sizeof(cl_uint), &zero, 0, NULL, NULL);
-
-		  if (status != CL_SUCCESS) {
-			  applog(LOG_ERR, "Error %d while resetting branch buffer counter %d.\n", status, i);
-			  return -1;
-		  }
-	  }
-
-	  clFinish(clState->commandQueue);
-
-	  // Main CN P0
-	  status = clEnqueueNDRangeKernel(clState->commandQueue, clState->kernel, 2, Nonce, gthreads, lthreads, 0, NULL, NULL);
-
-	  if (status != CL_SUCCESS) {
-		  applog(LOG_ERR, "Error %d while attempting to enqueue kernel 0.", status);
-		  return -1;
-	  }
-
-	  // Main CN P1
-	  status = clEnqueueNDRangeKernel(clState->commandQueue, clState->extra_kernels[0], 1, p_global_work_offset, globalThreads, localThreads, 0, NULL, NULL);
-
-	  if (status != CL_SUCCESS) {
-		  applog(LOG_ERR, "Error %d while attempting to enqueue kernel 1.", status);
-		  return -1;
-	  }
-
-	  // Main CN P2
-	  status = clEnqueueNDRangeKernel(clState->commandQueue, clState->extra_kernels[1], 2, Nonce, gthreads, lthreads, 0, NULL, NULL);
-
-	  if (status != CL_SUCCESS) {
-		  applog(LOG_ERR, "Error %d while attempting to enqueue kernel 2.", status);
-		  return -1;
-	  }
-
-	  // Read BranchBuf counters
-
-	  for (int i = 0; i < 4; ++i) {
-		  status = clEnqueueReadBuffer(clState->commandQueue, clState->BranchBuffer[i], CL_FALSE, sizeof(cl_uint) * GlobalThreads, sizeof(cl_uint), BranchBufCount + i, 0, NULL, NULL);
-
-		  if (status != CL_SUCCESS) {
-			  applog(LOG_ERR, "Error %d while attempting to read branch buffer counter %d.", status, i);
-			  return(-1);
-		  }
-	  }
-
-	  clFinish(clState->commandQueue);
-
-	  for (int i = 0; i < 4; ++i) {
-		  if (BranchBufCount[i]) {
-			  cl_ulong tmp = BranchBufCount[i];
-
-			  // Threads
-			  status = clSetKernelArg(clState->extra_kernels[i + 2], 4, sizeof(cl_ulong), &tmp);
-
-			  if (status != CL_SUCCESS) {
-				  applog(LOG_ERR, "Error %d while attempting to set argument 4 for kernel %d.", status, i + 2);
-				  return -1;
-			  }
-
-			  // Make it a multiple of the local worksize (some drivers will otherwise shit a brick)
-			  BranchBufCount[i] += (clState->wsize - (BranchBufCount[i] & (clState->wsize - 1)));
-
-			  status = clEnqueueNDRangeKernel(clState->commandQueue, clState->extra_kernels[i + 2], 1, p_global_work_offset, BranchBufCount + i, localThreads, 0, NULL, NULL);
-
-			  if (status != CL_SUCCESS) {
-				  applog(LOG_ERR, "Error %d while attempting to enqueue kernel %d.", status, i + 2);
-				  return -1;
-			  }
-		  }
-	  }
-  }
-  else {
-    status = clEnqueueNDRangeKernel(clState->commandQueue, clState->kernel, 1, p_global_work_offset,
-      globalThreads, localThreads, 0, NULL, NULL);
-
-    if (unlikely(status != CL_SUCCESS)) {
-      if (work->pool->algorithm.type == ALGO_ETHASH)
-        cg_runlock(&gpu->eth_dag.lock);
-      applog(LOG_ERR, "Error %d: Enqueueing kernel onto command queue. (clEnqueueNDRangeKernel)", status);
-      return -1;
-    }
-
-    for (i = 0; i < clState->n_extra_kernels; i++) {
-      status = clEnqueueNDRangeKernel(clState->commandQueue, clState->extra_kernels[i], 1, p_global_work_offset,
-      globalThreads, localThreads, 0, NULL, NULL);
-      if (unlikely(status != CL_SUCCESS)) {
-        applog(LOG_ERR, "Error %d: Enqueueing kernel onto command queue. (clEnqueueNDRangeKernel)", status);
-        return -1;
-      }
-    }
-  }
-  
-  status = clEnqueueReadBuffer(clState->commandQueue, clState->outputBuffer, CL_FALSE, 0,
-    buffersize, thrdata->res, 0, NULL, NULL);
-  if (unlikely(status != CL_SUCCESS)) {
-    if (work->pool->algorithm.type == ALGO_ETHASH)
-      cg_runlock(&gpu->eth_dag.lock);
-    applog(LOG_ERR, "Error: clEnqueueReadBuffer failed error %d. (clEnqueueReadBuffer)", status);
-    return -1;
-  }
-
-  /* The amount of work scanned can fluctuate when intensity changes
-   * and since we do this one cycle behind, we increment the work more
-   * than enough to prevent repeating work */
-  work->blk.nonce += gpu->max_hashes;
-
-  /* This finish flushes the readbuffer set with CL_FALSE in clEnqueueReadBuffer */
-  clFinish(clState->commandQueue);
-  if (work->pool->algorithm.type == ALGO_ETHASH)
-    cg_runlock(&gpu->eth_dag.lock);
-
-  /* found entry is used as a counter to say how many nonces exist */
-  if (thrdata->res[found]) {
-    /* Clear the buffer again */
-    status = clEnqueueWriteBuffer(clState->commandQueue, clState->outputBuffer, CL_FALSE, 0,
-      buffersize, blank_res, 0, NULL, NULL);
-    if (unlikely(status != CL_SUCCESS)) {
-      applog(LOG_ERR, "Error: clEnqueueWriteBuffer failed (opencl_scanhash).");
-      return -1;
-    }
-    applog(LOG_DEBUG, "GPU %d found something?", gpu->device_id);
-    postcalc_hash_async(thr, work, thrdata->res);
-//  postcalc_hash(thr);
-//  submit_tested_work(thr, work);
-//  submit_work_async(work);
-    memset(thrdata->res, 0, buffersize);
-    /* This finish flushes the writebuffer set with CL_FALSE in clEnqueueWriteBuffer */
-    clFinish(clState->commandQueue);
-  }
-
-  return hashes;
+	cgpu = &gpus[0];
+	cgpu->deven = DEV_ENABLED;
+	cgpu->drv = &opencl_drv;
+	cgpu->thr = NULL;
+	cgpu->device_id = 0;
+	cgpu->threads = opt_g_threads;
+	cgpu->virtual_gpu = 0;
+	cgpu->algorithm = default_profile.algorithm;
+	add_cgpu(cgpu);
 }
 
-// Cleanup OpenCL memory on the GPU
-// Note: This function is not thread-safe (clStates modification not atomic)
-static void opencl_thread_shutdown(struct thr_info *thr)
+static void reinit_fpga_device(struct cgpu_info *gpu)
 {
-  const int thr_id = thr->id;
-  _clState *clState = clStates[thr_id];
-  clStates[thr_id] = NULL;
-  unsigned int i;
+	tq_push(control_thr[gpur_thr_id].q, gpu);
+}
 
-  if (clState) {
-    clFinish(clState->commandQueue);
-    clReleaseMemObject(clState->outputBuffer);
-    clReleaseMemObject(clState->CLbuffer0);
-	if (clState->Scratchpads)
-	  clReleaseMemObject(clState->Scratchpads);
-    if (clState->buffer1)
-      clReleaseMemObject(clState->buffer1);
-    if (clState->buffer2)
-      clReleaseMemObject(clState->buffer2);
-    if (clState->buffer3)
-      clReleaseMemObject(clState->buffer3);
-    if (clState->padbuffer8)
-      clReleaseMemObject(clState->padbuffer8);
-    clReleaseKernel(clState->kernel);
-    for (i = 0; i < clState->n_extra_kernels; i++)
-      clReleaseKernel(clState->extra_kernels[i]);
-    clReleaseProgram(clState->program);
-    clReleaseCommandQueue(clState->commandQueue);
-    clReleaseContext(clState->context);
-    if (clState->extra_kernels)
-      free(clState->extra_kernels);
-    free(clState);
-  }
-  // Causes invalid free crashes in some cases.
-  //free(((struct opencl_thread_data *)thr->cgpu_data)->res);
-  //free(thr->cgpu_data);
-  thr->cgpu_data = NULL;
+static void get_fpga_statline_before(char *buf, size_t bufsiz, struct cgpu_info *gpu)
+{
+	float gt = 0.0f;
+
+	tailsprintf(buf, bufsiz, "%5.1fC ", gt);
+	tailsprintf(buf, bufsiz, "        ");
+	tailsprintf(buf, bufsiz, "| ");
+}
+
+static void get_fpga_statline(char *buf, size_t bufsiz, struct cgpu_info *gpu)
+{
+	tailsprintf(buf, bufsiz, " I:%2d", gpu->intensity);
+}
+
+static bool fpga_thread_prepare(struct thr_info *thr)
+{
+	char name[256];
+	struct timeval now;
+	struct cgpu_info *cgpu = thr->cgpu;
+	int gpu = cgpu->device_id;
+	int virtual_gpu = cgpu->virtual_gpu;
+	int i = thr->id;
+	static bool failmessage = false;
+	int buffersize = BUFFERSIZE;
+
+
+	strcpy(name, "");
+	applog(LOG_INFO, "Init FPGA thread %i FPGA %i virtual FPGA %i", i, gpu, virtual_gpu);
+
+	if (!cgpu->name)
+		cgpu->name = strdup("FPGA");
+
+	applog(LOG_INFO, "initCl() finished. Found %s", name);
+	cgtime(&now);
+	get_datestamp(cgpu->init, sizeof(cgpu->init), &now);
+
+	return true;
+}
+
+extern char devpath[512];
+extern int devbaud;
+extern int devtimeout;
+extern int fd;
+
+static bool fpga_thread_init(struct thr_info *thr)
+{
+	struct cgpu_info *gpu = thr->cgpu;
+	int r;
+
+	thr->cgpu_data = 0;// thrdata;
+	gpu->status = LIFE_WELL;
+	gpu->device_last_well = time(NULL);
+	
+	fd = serial_open(devpath, devbaud, devtimeout, 1);
+
+	return fd == 0 ? false : true;
+}
+
+static bool fpga_prepare_work(struct thr_info __maybe_unused *thr, struct work *work)
+{
+	work->blk.work = work;
+	if (work->pool->algorithm.precalc_hash)
+		work->pool->algorithm.precalc_hash(&work->blk, 0, (uint32_t *)(work->data));
+	thr->pool_no = work->pool->pool_no;
+
+	return true;
+}
+
+#include "sph/sph_blake.h"
+
+void bswap(unsigned char *b, int len)
+{
+	if ((len & 3) != 0) {
+		printf("bswap error: len not multiple of 4\n");
+		return;
+	}
+
+	while (len) {
+		unsigned char t[4];
+
+		t[0] = b[0];
+		t[1] = b[1];
+		t[2] = b[2];
+		t[3] = b[3];
+		b[0] = t[3];
+		b[1] = t[2];
+		b[2] = t[1];
+		b[3] = t[0];
+		b += 4;
+		len -= 4;
+	}
+}
+
+static void reverse(unsigned char *b, int len)
+{
+	static unsigned char bt[1024];
+	int i, j;
+
+	if (len > 128) {
+		system("pause");
+		exit(0);
+	}
+	//	bt = (unsigned char*)malloc(len + 1);
+
+	for (i = 0, j = len; i < len;) {
+		bt[i++] = b[--j];
+	}
+
+	memcpy(b, bt, len);
+
+	//	free(bt);
+}
+
+static int64_t fpga_scanhash(struct thr_info *thr, struct work *work, int64_t __maybe_unused max_nonce)
+{
+	const int thr_id = thr->id;
+	struct opencl_thread_data *thrdata = (struct opencl_thread_data *)thr->cgpu_data;
+	struct cgpu_info *gpu = thr->cgpu;
+
+	char *ob_hex;
+	
+	unsigned char sdata[80];
+	unsigned char wbuf[56];
+	unsigned char buf[56];
+	unsigned int nonce;
+	sph_blake256_context lyra2z_blake_mid;
+
+	memset(wbuf, 0, 52);
+
+	unsigned char input[(512 + 128) / 8] = {
+		0x00, 0x00, 0x00, 0x20, 0x6E, 0x7E, 0x5F, 0xA2, 0x11, 0x0B, 0xA7, 0x79, 0xED, 0x8D, 0xD3, 0x4D,
+		0x1F, 0xF7, 0x33, 0x21, 0x96, 0x79, 0xD3, 0x8E, 0x69, 0x0A, 0x58, 0xE1, 0xDE, 0x1D, 0x04, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0xE7, 0x7D, 0x10, 0x0C, 0x31, 0x9D, 0x75, 0x5B, 0xB9, 0x58, 0x13, 0xD9,
+		0x79, 0xD7, 0x80, 0xD8, 0xBB, 0xAC, 0x20, 0x5A, 0xC7, 0x33, 0x36, 0xFC, 0xD9, 0x77, 0xEA, 0xD2,
+		0x86, 0x09, 0xF6, 0xF1, 0x27, 0x08, 0x3F, 0x5B, 0x51, 0xC5, 0x19, 0x1B, 0x00, 0x02, 0xE2, 0xC0,
+
+	};
+
+	memcpy(sdata, work->data, 80);
+
+	bswap(sdata, 80);
+
+	sph_blake256_init(&lyra2z_blake_mid);
+	sph_blake256(&lyra2z_blake_mid, sdata, 64);
+
+	wbuf[48] = work->target[0x1F];
+	wbuf[49] = work->target[0x1E];
+	wbuf[50] = work->target[0x1D];
+	wbuf[51] = work->target[0x1C];
+
+	memcpy(wbuf + 0, &lyra2z_blake_mid.H[0], 32);
+	memcpy(wbuf + 32, ((unsigned char*)(sdata)) + 64, 16);
+
+//	bswap(wbuf, 32);
+	reverse(wbuf, 44);
+	bswap(wbuf, 12);
+
+#define SERIAL_READ_SIZE 8
+
+	struct FPGA_INFO {
+		int device_fd;
+		int timeout;
+		double Hs;		// Seconds Per Hash
+	};
+
+	unsigned char ob_bin[44], nonce_buf[SERIAL_READ_SIZE];
+	struct timeval tv_start, tv_finish, elapsed, tv_end, diff;
+	int ret;
+
+	struct cgpu_info *serial_fpga;
+	struct FPGA_INFO *info;
+	struct FPGA_INFO _info;
+
+	serial_fpga = thr->cgpu;
+	info = &_info;
+
+	info->device_fd = fd;
+	info->Hs = 200;
+	info->timeout = 5;
+
+
+	// Send Data To FPGA
+	//	ret = write(fd, ob_bin, sizeof(ob_bin));
+	_write(fd, wbuf, 52);
+
+	/*	if (ret != sizeof(ob_bin)) {
+	applog(LOG_ERR, "%s%i: Serial Send Error (ret=%d)", serial_fpga->drv->name, serial_fpga->device_id, ret);
+	//serial_fpga_close(thr);
+	dev_error(serial_fpga, REASON_DEV_COMMS_ERROR);
+	return 0;
+	}*/
+
+	if (opt_debug) {
+		char *ob_hex = bin2hex(wbuf, 52);
+		applog(LOG_ERR, "Serial FPGA %d sent: %s", serial_fpga->device_id, ob_hex);
+		free(ob_hex);
+	}
+
+	elapsed.tv_sec = 0;
+	elapsed.tv_usec = 0;
+	cgtime(&tv_start);
+
+	size_t len;
+
+	applog(LOG_DEBUG, "%s%i: Begin Scan For Nonces", serial_fpga->drv->name, serial_fpga->device_id);
+	while (thr && !thr->work_restart) {
+
+		memset(buf, 0, 8);
+
+		// Check Serial Port For 1/10 Sec For Nonce  
+		//		ret = read(fd, nonce_buf, SERIAL_READ_SIZE);
+		ret = serial_recv(fd, (char*)buf, 8, &len);
+
+		// Calculate Elapsed Time
+		cgtime(&tv_end);
+		timersub(&tv_end, &tv_start, &elapsed);
+
+		if (ret == 0 && len != 8) {		// No Nonce Found
+			if (elapsed.tv_sec > info->timeout) {
+				applog(LOG_ERR, "%s%i: End Scan For Nonces - Time = %d sec", serial_fpga->drv->name, serial_fpga->device_id, elapsed.tv_sec);
+				//thr->work_restart = true;
+				break;
+			}
+			continue;
+		}
+		else if (ret != 0) { //(ret < SERIAL_READ_SIZE) {
+			applog(LOG_ERR, "%s%i: Serial Read Error (ret=%d)", serial_fpga->drv->name, serial_fpga->device_id, ret);
+			//serial_fpga_close(thr);
+			dev_error(serial_fpga, REASON_DEV_COMMS_ERROR);
+			break;
+		}
+
+		memcpy((char *)&nonce, buf, 4);
+
+		nonce = swab32(nonce);
+
+		//		curr_hw_errors = serial_fpga->hw_errors;
+
+		applog(LOG_ERR, "%s%i: Nonce Found - %08X (%5.1fMhz)", serial_fpga->drv->name, serial_fpga->device_id, nonce, (double)(1 / (info->Hs * 1000000)));
+		submit_nonce(thr, work, nonce);
+		break;
+
+		// Update Hashrate
+		//		if (serial_fpga->hw_errors == curr_hw_errors)
+		//			info->Hs = ((double)(elapsed.tv_sec) + ((double)(elapsed.tv_usec)) / ((double)1000000)) / (double)nonce;
+
+	}
+
+
+	int hash_count = 200;// ((double)(elapsed.tv_sec) + ((double)(elapsed.tv_usec)) / ((double)1000000)) / info->Hs;
+
+						 //	free_work(work);
+	return hash_count;
+
+
+	/* The amount of work scanned can fluctuate when intensity changes
+	* and since we do this one cycle behind, we increment the work more
+	* than enough to prevent repeating work */
+	work->blk.nonce += gpu->max_hashes;
+
+	return 1000000/2300;
+}
+
+static void fpga_thread_shutdown(struct thr_info *thr)
+{
+	if(fd)
+		_close(fd);
+	fd = 0;
+	thr->cgpu_data = NULL;
 }
 
 struct device_drv opencl_drv = {
-  /*.drv_id = */      DRIVER_opencl,
-  /*.dname = */     "opencl",
-  /*.name = */      "GPU",
-  /*.drv_detect = */    opencl_detect,
-  /*.reinit_device = */   reinit_opencl_device,
-#ifdef HAVE_ADL
-  /*.get_statline_before = */ get_opencl_statline_before,
-#else
-  NULL,
-#endif
-  /*.get_statline = */    get_opencl_statline,
-  /*.api_data = */    NULL,
-  /*.get_stats = */   NULL,
+  /*.drv_id = */            DRIVER_opencl,
+  /*.dname = */             "fpga",
+  /*.name = */              "FPG",
+  /*.drv_detect = */        fpga_detect,
+  /*.reinit_device = */     reinit_fpga_device,
+  /*.get_statline_before =*/get_fpga_statline_before,
+  /*.get_statline = */      get_fpga_statline,
+  /*.api_data = */          NULL,
+  /*.get_stats = */         NULL,
   /*.identify_device = */   NULL,
-  /*.set_device = */    NULL,
+  /*.set_device = */        NULL,
 
-  /*.thread_prepare = */    opencl_thread_prepare,
+  /*.thread_prepare = */    fpga_thread_prepare,
   /*.can_limit_work = */    NULL,
-  /*.thread_init = */   opencl_thread_init,
-  /*.prepare_work = */    opencl_prepare_work,
-  /*.hash_work = */   NULL,
-  /*.scanhash = */    opencl_scanhash,
-  /*.scanwork = */    NULL,
-  /*.queue_full = */    NULL,
-  /*.flush_work = */    NULL,
-  /*.update_work = */   NULL,
-  /*.hw_error = */    NULL,
-  /*.thread_shutdown = */   opencl_thread_shutdown,
-  /*.thread_enable =*/    NULL,
+  /*.thread_init = */       fpga_thread_init,
+  /*.prepare_work = */      fpga_prepare_work,
+  /*.hash_work = */         NULL,
+  /*.scanhash = */          fpga_scanhash,
+  /*.scanwork = */          NULL,
+  /*.queue_full = */        NULL,
+  /*.flush_work = */        NULL,
+  /*.update_work = */       NULL,
+  /*.hw_error = */          NULL,
+  /*.thread_shutdown = */   fpga_thread_shutdown,
+  /*.thread_enable =*/      NULL,
   false,
   0,
   0
