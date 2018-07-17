@@ -115,6 +115,7 @@
       <LinkTimeCodeGeneration>
       </LinkTimeCodeGeneration>
       <IgnoreSpecificDefaultLibraries>LIBCMT</IgnoreSpecificDefaultLibraries>
+      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
     </Link>
     <PostBuildEvent>
       <Command>

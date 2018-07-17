@@ -40,6 +40,12 @@
 
 /* TODO: cleanup externals ********************/
 
+double fpga_temp = 0.0f;
+int fpga_freq = 0;
+int fpga_cores = 0;
+int dev_timeout;
+int fpga_clock;
+
 #ifdef HAVE_CURSES
 extern WINDOW *mainwin, *statuswin, *logwin;
 extern void enable_curses(void);
@@ -59,631 +65,6 @@ extern void decay_time(double *f, double fadd);
 
 /**********************************************/
 
-char *set_vector(char *arg)
-{
-  int i, val = 0, device = 0;
-  char *nextptr;
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set vector";
-  val = atoi(nextptr);
-  if (val != 1 && val != 2 && val != 4)
-    return "Invalid value passed to set_vector";
-
-  gpus[device++].vwidth = val;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-    if (val != 1 && val != 2 && val != 4)
-      return "Invalid value passed to set_vector";
-
-    gpus[device++].vwidth = val;
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++)
-      gpus[i].vwidth = gpus[0].vwidth;
-  }
-
-  return NULL;
-}
-
-char *set_worksize(const char *arg)
-{
-  int i, val = 0, device = 0;
-  char *tmpstr = strdup(arg);
-  char *nextptr;
-
-  if ((nextptr = strtok(tmpstr, ",")) == NULL) {
-    free(tmpstr);
-    return "Invalid parameters for set work size";
-  }
-
-  do {
-    val = atoi(nextptr);
-
-    if (val < 1 || val > 9999) {
-      free(tmpstr);
-      return "Invalid value passed to set_worksize";
-    }
-
-    applog(LOG_DEBUG, "GPU %d Worksize set to %u.", device, val);
-    gpus[device++].work_size = val;
-  } while ((nextptr = strtok(NULL, ",")) != NULL);
-
-  // if only 1 worksize was passed, assign the same worksize for all remaining GPUs
-  if (device == 1) {
-    for (i = device; i < total_devices; ++i) {
-      gpus[i].work_size = gpus[0].work_size;
-      applog(LOG_DEBUG, "GPU %d Worksize set to %u.", i, gpus[i].work_size);
-    }
-  }
-
-  free(tmpstr);
-  return NULL;
-}
-
-char *set_shaders(char *arg)
-{
-  int i, val = 0, device = 0;
-  char *nextptr;
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set lookup gap";
-  val = atoi(nextptr);
-
-  gpus[device++].shaders = val;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-
-    gpus[device++].shaders = val;
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++)
-      gpus[i].shaders = gpus[0].shaders;
-  }
-
-  return NULL;
-}
-
-char *set_lookup_gap(char *arg)
-{
-  int i, val = 0, device = 0;
-  char *nextptr;
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set lookup gap";
-  val = atoi(nextptr);
-
-  gpus[device++].opt_lg = val;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-
-    gpus[device++].opt_lg = val;
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++)
-      gpus[i].opt_lg = gpus[0].opt_lg;
-  }
-
-  return NULL;
-}
-
-char *set_thread_concurrency(const char *arg)
-{
-  int i, device = 0;
-  size_t val = 0;
-  char *tmpstr = strdup(arg);
-  char *nextptr;
-
-  // empty string - use 0 and let algo autodetect the TC
-  if (empty_string(tmpstr)) {
-    applog(LOG_DEBUG, "GPU %d Thread Concurrency set to %lu.", device, val);
-    gpus[device++].opt_tc = val;
-  }
-  // not empty string
-  else {
-    if ((nextptr = strtok(tmpstr, ",")) == NULL) {
-      free(tmpstr);
-      return "Invalid parameters for set_thread_concurrency";
-    }
-
-    do {
-      val = (unsigned long)atol(nextptr);
-
-      applog(LOG_DEBUG, "GPU %d Thread Concurrency set to %lu.", device, val);
-      gpus[device++].opt_tc = val;
-    } while ((nextptr = strtok(NULL, ",")) != NULL);
-  }
-
-  // if only 1 TC was passed, assign the same worksize for all remaining GPUs
-  if (device == 1) {
-    for (i = device; i < total_devices; ++i) {
-      gpus[i].opt_tc = gpus[0].opt_tc;
-      applog(LOG_DEBUG, "GPU %d Thread Concurrency set to %lu.", i, gpus[i].opt_tc);
-    }
-  }
-
-  free(tmpstr);
-  return NULL;
-}
-
-/* This function allows us to map an adl device to an opencl device for when
- * simple enumeration has failed to match them. */
-char *set_gpu_map(char *arg)
-{
-  int val1 = 0, val2 = 0;
-  char *nextptr;
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set gpu map";
-  if (sscanf(arg, "%d:%d", &val1, &val2) != 2)
-    return "Invalid description for map pair";
-  if (val1 < 0 || val1 > MAX_GPUDEVICES || val2 < 0 || val2 > MAX_GPUDEVICES)
-    return "Invalid value passed to set_gpu_map";
-
-  gpus[val1].virtual_adl = val2;
-  gpus[val1].mapped = true;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    if (sscanf(nextptr, "%d:%d", &val1, &val2) != 2)
-      return "Invalid description for map pair";
-    if (val1 < 0 || val1 > MAX_GPUDEVICES || val2 < 0 || val2 > MAX_GPUDEVICES)
-      return "Invalid value passed to set_gpu_map";
-    gpus[val1].virtual_adl = val2;
-    gpus[val1].mapped = true;
-  }
-
-  return NULL;
-}
-
-char *set_gpu_threads(const char *_arg)
-{
-  int i, val = 1, device = 0;
-  char *nextptr;
-  char *arg = (char *)alloca(strlen(_arg) + 1);
-  strcpy(arg, _arg);
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set_gpu_threads";
-  val = atoi(nextptr);
-  if (val < 1 || val > 20) // gpu_threads increase max value to 20
-    return "Invalid value passed to set_gpu_threads";
-
-  gpus[device++].threads = val;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-    if (val < 1 || val > 20) // gpu_threads increase max value to 20
-      return "Invalid value passed to set_gpu_threads";
-
-    gpus[device++].threads = val;
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++)
-      gpus[i].threads = gpus[0].threads;
-  }
-
-  return NULL;
-}
-
-char *set_gpu_engine(const char *_arg)
-{
-  int i, val1 = 0, val2 = 0, device = 0;
-  char *nextptr;
-  char *arg = (char *)alloca(strlen(_arg) + 1);
-  strcpy(arg, _arg);
-
-  if (!(nextptr = strtok(arg, ",")))
-    return "Invalid parameters for set gpu engine";
-
-  do {
-    get_intrange(nextptr, &val1, &val2);
-    if (val1 < 0 || val1 > 9999 || val2 < 0 || val2 > 9999)
-      return "Invalid value passed to set_gpu_engine";
-
-    gpus[device].min_engine = val1;
-    gpus[device].gpu_engine = val2;
-
-    //also set adl settings otherwise range will never properly be applied
-    //since min_engine/gpu_engine are only called during init_adl() at startup
-    gpus[device].adl.minspeed = val1 * 100;
-    gpus[device].adl.maxspeed = val2 * 100;
-
-    device++;
-  } while ((nextptr = strtok(NULL, ",")) != NULL);
-
-  //if only 1 range passed, apply to all gpus
-  if (device == 1) {
-    for (i = 1; i < MAX_GPUDEVICES; i++) {
-      gpus[i].min_engine = gpus[0].min_engine;
-      gpus[i].gpu_engine = gpus[0].gpu_engine;
-
-      //set adl values
-      gpus[i].adl.minspeed = val1 * 100;
-      gpus[i].adl.maxspeed = val2 * 100;
-    }
-  }
-
-  return NULL;
-}
-
-char *set_gpu_fan(const char *_arg)
-{
-  int i, val1 = 0, val2 = 0, device = 0;
-  char *nextptr;
-  char *arg = (char *)alloca(strlen(_arg) + 1);
-  strcpy(arg, _arg);
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set gpu fan";
-  get_intrange(nextptr, &val1, &val2);
-  if (val1 < 0 || val1 > 100 || val2 < 0 || val2 > 100)
-    return "Invalid value passed to set_gpu_fan";
-
-  gpus[device].min_fan = val1;
-  gpus[device].gpu_fan = val2;
-  device++;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    get_intrange(nextptr, &val1, &val2);
-    if (val1 < 0 || val1 > 100 || val2 < 0 || val2 > 100)
-      return "Invalid value passed to set_gpu_fan";
-
-    gpus[device].min_fan = val1;
-    gpus[device].gpu_fan = val2;
-    device++;
-  }
-
-  if (device == 1) {
-    for (i = 1; i < MAX_GPUDEVICES; i++) {
-      gpus[i].min_fan = gpus[0].min_fan;
-      gpus[i].gpu_fan = gpus[0].gpu_fan;
-    }
-  }
-
-  return NULL;
-}
-
-char *set_gpu_memclock(const char *_arg)
-{
-  int i, val = 0, device = 0;
-  char *nextptr;
-  char *arg = (char *)alloca(strlen(_arg) + 1);
-  strcpy(arg, _arg);
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set gpu memclock";
-  val = atoi(nextptr);
-  if (val < 0 || val >= 9999)
-    return "Invalid value passed to set_gpu_memclock";
-
-  gpus[device++].gpu_memclock = val;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-    if (val < 0 || val >= 9999)
-      return "Invalid value passed to set_gpu_memclock";
-
-    gpus[device++].gpu_memclock = val;
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++)
-      gpus[i].gpu_memclock = gpus[0].gpu_memclock;
-  }
-
-  return NULL;
-}
-
-char *set_gpu_memdiff(char *arg)
-{
-  int i, val = 0, device = 0;
-  char *nextptr;
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set gpu memdiff";
-  val = atoi(nextptr);
-  if (val < -9999 || val > 9999)
-    return "Invalid value passed to set_gpu_memdiff";
-
-  gpus[device++].gpu_memdiff = val;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-    if (val < -9999 || val > 9999)
-      return "Invalid value passed to set_gpu_memdiff";
-
-    gpus[device++].gpu_memdiff = val;
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++)
-      gpus[i].gpu_memdiff = gpus[0].gpu_memdiff;
-  }
-
-  return NULL;
-}
-
-char *set_gpu_powertune(char *arg)
-{
-  int i, val = 0, device = 0;
-  char *nextptr;
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set gpu powertune";
-  val = atoi(nextptr);
-  if (val < -99 || val > 99)
-    return "Invalid value passed to set_gpu_powertune";
-
-  gpus[device++].gpu_powertune = val;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-    if (val < -99 || val > 99)
-      return "Invalid value passed to set_gpu_powertune";
-
-    gpus[device++].gpu_powertune = val;
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++)
-      gpus[i].gpu_powertune = gpus[0].gpu_powertune;
-  }
-
-  return NULL;
-}
-
-char *set_gpu_vddc(char *arg)
-{
-  int i, device = 0;
-  float val = 0;
-  char *nextptr;
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set gpu vddc";
-  val = atof(nextptr);
-  if (val < 0 || val >= 9999)
-    return "Invalid value passed to set_gpu_vddc";
-
-  gpus[device++].gpu_vddc = val;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atof(nextptr);
-    if (val < 0 || val >= 9999)
-      return "Invalid value passed to set_gpu_vddc";
-
-    gpus[device++].gpu_vddc = val;
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++)
-      gpus[i].gpu_vddc = gpus[0].gpu_vddc;
-  }
-
-  return NULL;
-}
-
-char *set_temp_overheat(char *arg)
-{
-  int i, val = 0, device = 0, *to;
-  char *nextptr;
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set temp overheat";
-  val = atoi(nextptr);
-  if (val < 0 || val > 200)
-    return "Invalid value passed to set temp overheat";
-
-  gpus[device].adl.overtemp = val;
-  gpus[device++].sysfs_info.OverHeatTemp = val;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-    if (val < 0 || val > 200)
-      return "Invalid value passed to set temp overheat";
-
-    gpus[device].adl.overtemp = val;
-    gpus[device++].sysfs_info.OverHeatTemp = val;
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++) {
-      gpus[i].adl.overtemp = val;
-      gpus[i].sysfs_info.OverHeatTemp = val;
-    }
-  }
-
-  return NULL;
-}
-
-char *set_temp_target(char *arg)
-{
-  int i, val = 0, device = 0, *tt;
-  char *nextptr;
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set temp target";
-  val = atoi(nextptr);
-  if (val < 0 || val > 200)
-    return "Invalid value passed to set temp target";
-
-  tt = &gpus[device].adl.targettemp;
-  *tt = val;
-  tt = (int*)&gpus[device++].sysfs_info.TargetTemp;
-  *tt = val;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-    if (val < 0 || val > 200)
-      return "Invalid value passed to set temp target";
-
-    tt = &gpus[device].adl.targettemp;
-    *tt = val;
-    tt = (int*)&gpus[device++].sysfs_info.TargetTemp;
-    *tt = val;    
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++) {
-      tt = &gpus[i].adl.targettemp;
-      *tt = val;
-      tt = (int*)&gpus[i].sysfs_info.TargetTemp;
-      *tt = val;
-    }
-  }
-
-  return NULL;
-}
-
-char *set_intensity(const char *_arg)
-{
-  int i, device = 0, *tt;
-  char *nextptr, val = 0;
-  char *arg = (char *)alloca(strlen(_arg) + 1);
-  strcpy(arg, _arg);
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for set intensity";
-  if (!strncasecmp(nextptr, "d", 1))
-    gpus[device].dynamic = true;
-  else {
-    gpus[device].dynamic = false;
-    val = atoi(nextptr);
-    if (val == 0) return "disabled";
-    if (val < MIN_INTENSITY || val > MAX_INTENSITY)
-      return "Invalid value passed to set intensity";
-    tt = &gpus[device].intensity;
-    *tt = val;
-    gpus[device].xintensity = 0; // Disable shader based intensity
-    gpus[device].rawintensity = 0; // Disable raw intensity
-  }
-
-  device++;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    if (!strncasecmp(nextptr, "d", 1))
-      gpus[device].dynamic = true;
-    else {
-      gpus[device].dynamic = false;
-      val = atoi(nextptr);
-      if (val == 0) return "disabled";
-      if (val < MIN_INTENSITY || val > MAX_INTENSITY)
-        return "Invalid value passed to set intensity";
-
-      tt = &gpus[device].intensity;
-      *tt = val;
-      gpus[device].xintensity = 0; // Disable shader based intensity
-      gpus[device].rawintensity = 0; // Disable raw intensity
-    }
-    device++;
-  }
-  if (device == 1) {
-    for (i = device; i < MAX_GPUDEVICES; i++) {
-      gpus[i].dynamic = gpus[0].dynamic;
-      gpus[i].intensity = gpus[0].intensity;
-      gpus[i].xintensity = 0; // Disable shader based intensity
-      gpus[i].rawintensity = 0; // Disable raw intensity
-    }
-  }
-
-  return NULL;
-}
-
-char *set_xintensity(const char *_arg)
-{
-  int i, device = 0, val = 0;
-  char *nextptr;
-  char *arg = (char *)alloca(strlen(_arg) + 1);
-  strcpy(arg, _arg);
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for shader based intensity";
-  val = atoi(nextptr);
-  if (val == 0) return "disabled";
-  if (val < MIN_XINTENSITY || val > MAX_XINTENSITY)
-    return "Invalid value passed to set shader-based intensity";
-
-  gpus[device].dynamic = false; // Disable dynamic intensity
-  gpus[device].intensity = 0; // Disable regular intensity
-  gpus[device].rawintensity = 0; // Disable raw intensity
-  gpus[device].xintensity = val;
-  device++;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-    if (val == 0) return "disabled";
-    if (val < MIN_XINTENSITY || val > MAX_XINTENSITY)
-      return "Invalid value passed to set shader based intensity";
-    gpus[device].dynamic = false; // Disable dynamic intensity
-    gpus[device].intensity = 0; // Disable regular intensity
-    gpus[device].rawintensity = 0; // Disable raw intensity
-    gpus[device].xintensity = val;
-    device++;
-  }
-  if (device == 1)
-  for (i = device; i < MAX_GPUDEVICES; i++) {
-    gpus[i].dynamic = gpus[0].dynamic;
-    gpus[i].intensity = gpus[0].intensity;
-    gpus[i].rawintensity = gpus[0].rawintensity;
-    gpus[i].xintensity = gpus[0].xintensity;
-  }
-
-  return NULL;
-}
-
-char *set_rawintensity(const char *_arg)
-{
-  int i, device = 0, val = 0;
-  char *nextptr;
-  char *arg = (char *)alloca(strlen(_arg) + 1);
-  strcpy(arg, _arg);
-
-  nextptr = strtok(arg, ",");
-  if (nextptr == NULL)
-    return "Invalid parameters for raw intensity";
-  val = atoi(nextptr);
-  if (val == 0) return "disabled";
-  if (val < MIN_RAWINTENSITY || val > MAX_RAWINTENSITY)
-    return "Invalid value passed to set raw intensity";
-
-  gpus[device].dynamic = false; // Disable dynamic intensity
-  gpus[device].intensity = 0; // Disable regular intensity
-  gpus[device].xintensity = 0; // Disable xintensity
-  gpus[device].rawintensity = val;
-  device++;
-
-  while ((nextptr = strtok(NULL, ",")) != NULL) {
-    val = atoi(nextptr);
-    if (val == 0) return "disabled";
-    if (val < MIN_RAWINTENSITY || val > MAX_RAWINTENSITY)
-      return "Invalid value passed to set raw intensity";
-    gpus[device].dynamic = false; // Disable dynamic intensity
-    gpus[device].intensity = 0; // Disable regular intensity
-    gpus[device].xintensity = 0; // Disable xintensity
-    gpus[device].rawintensity = val;
-    device++;
-  }
-  if (device == 1)
-  for (i = device; i < MAX_GPUDEVICES; i++) {
-    gpus[i].dynamic = gpus[0].dynamic;
-    gpus[i].intensity = gpus[0].intensity;
-    gpus[i].rawintensity = gpus[0].rawintensity;
-    gpus[i].xintensity = gpus[0].xintensity;
-  }
-
-  return NULL;
-}
-
 void print_ndevs(int *ndevs)
 {
   opt_verbose = true;
@@ -694,31 +75,6 @@ void print_ndevs(int *ndevs)
 
 struct cgpu_info gpus[MAX_GPUDEVICES]; /* Maximum number apparently possible */
 struct cgpu_info *cpus;
-
-/* In dynamic mode, only the first thread of each device will be in use.
- * This potentially could start a thread that was stopped with the start-stop
- * options if one were to disable dynamic from the menu on a paused GPU */
-void pause_dynamic_threads(int gpu)
-{
-  struct cgpu_info *cgpu = &gpus[gpu];
-  int i;
-
-  rd_lock(&mining_thr_lock); 
-  for (i = 1; i < cgpu->threads; i++) {
-    struct thr_info *thr;
-
-    thr = cgpu->thr[i];
-    if (!thr->pause && cgpu->dynamic) {
-      applog(LOG_WARNING, "Disabling extra threads due to dynamic mode.");
-      applog(LOG_WARNING, "Tune dynamic intensity with --gpu-dyninterval");
-    }
-
-    thr->pause = cgpu->dynamic;
-    if (!cgpu->dynamic && cgpu->deven != DEV_DISABLED)
-      cgsem_post(&thr->sem);
-  }
-  rd_unlock(&mining_thr_lock);
-}
 
 #if defined(HAVE_CURSES)
 void manage_gpu(void)
@@ -908,7 +264,7 @@ retry: // TODO: refactor
       // fix config with new settings so that we can save them
       update_config_intensity(get_gpu_profile(selected));
 
-      pause_dynamic_threads(selected);
+//      pause_dynamic_threads(selected);
       free(intvar);
       goto retry;
     }
@@ -927,7 +283,7 @@ retry: // TODO: refactor
     // fix config with new settings so that we can save them
     update_config_intensity(get_gpu_profile(selected));
 
-    pause_dynamic_threads(selected);
+//    pause_dynamic_threads(selected);
     goto retry;
   }
   else if (!strncasecmp(&input, "x", 1)) {
@@ -961,7 +317,7 @@ retry: // TODO: refactor
     // fix config with new settings so that we can save them
     update_config_xintensity(get_gpu_profile(selected));
 
-    pause_dynamic_threads(selected);
+//    pause_dynamic_threads(selected);
     goto retry;
   }
   else if (!strncasecmp(&input, "a", 1)) {
@@ -995,7 +351,7 @@ retry: // TODO: refactor
     // fix config with new settings so that we can save them
     update_config_rawintensity(get_gpu_profile(selected));
 
-    pause_dynamic_threads(selected);
+//    pause_dynamic_threads(selected);
     goto retry;
   }
   else if (!strncasecmp(&input, "r", 1)) {
@@ -1030,149 +386,6 @@ void manage_gpu(void)
 {
 }
 #endif
-
-static _clState *clStates[MAX_GPUDEVICES];
-
-static void set_threads_hashes(unsigned int vectors, unsigned int compute_shaders, int64_t *hashes, size_t *globalThreads,
-  unsigned int minthreads, __maybe_unused int *intensity, __maybe_unused int *xintensity,
-  __maybe_unused int *rawintensity, algorithm_t *algorithm)
-{
-  unsigned int threads = 0;
-  while (threads < minthreads) {
-
-    if (*rawintensity > 0) {
-      threads = *rawintensity;
-    }
-    else if (*xintensity > 0) {
-      threads = compute_shaders * ((algorithm->xintensity_shift) ? (1 << (algorithm->xintensity_shift + *xintensity)) : *xintensity);
-    }
-    else {
-      threads = 1 << (algorithm->intensity_shift + *intensity);
-    }
-
-    if (threads < minthreads) {
-      if (likely(*intensity < MAX_INTENSITY)) {
-        (*intensity)++;
-      }
-      else {
-        threads = minthreads;
-      }
-    }
-  }
-
-  *globalThreads = threads;
-  *hashes = threads * vectors;
-}
-
-/* We have only one thread that ever re-initialises GPUs, thus if any GPU
- * init command fails due to a completely wedged GPU, the thread will never
- * return, unable to harm other GPUs. If it does return, it means we only had
- * a soft failure and then the reinit_gpu thread is ready to tackle another
- * GPU */
-void *reinit_gpu(void *userdata)
-{
-  struct thr_info *mythr = (struct thr_info *)userdata;
-  struct cgpu_info *cgpu;
-  struct thr_info *thr;
-  struct timeval now;
-  char name[256];
-  int thr_id;
-  int gpu;
-
-  pthread_detach(pthread_self());
-
-select_cgpu:
-  cgpu = (struct cgpu_info *)tq_pop(mythr->q, NULL);
-  if (!cgpu)
-    goto out;
-
-  if (clDevicesNum() != nDevs) {
-    applog(LOG_WARNING, "Hardware not reporting same number of active devices, will not attempt to restart GPU");
-    goto out;
-  }
-
-  gpu = cgpu->device_id;
-
-  rd_lock(&mining_thr_lock);
-  for (thr_id = 0; thr_id < mining_threads; ++thr_id) {
-    thr = mining_thr[thr_id];
-    cgpu = thr->cgpu;
-    if (cgpu->drv->drv_id != DRIVER_opencl)
-      continue;
-    if (dev_from_id(thr_id) != gpu)
-      continue;
-
-    thr->rolling = thr->cgpu->rolling = 0;
-    /* Reports the last time we tried to revive a sick GPU */
-    cgtime(&thr->sick);
-    if (!pthread_kill(thr->pth, 0)) {
-      applog(LOG_WARNING, "Thread %d still exists, killing it off", thr_id);
-      cg_completion_timeout(&thr_info_cancel_join, thr, 5000);
-      thr->cgpu->drv->thread_shutdown(thr);
-    }
-    else
-      applog(LOG_WARNING, "Thread %d no longer exists", thr_id);
-  }
-  rd_unlock(&mining_thr_lock);
-
-  rd_lock(&mining_thr_lock);
-  for (thr_id = 0; thr_id < mining_threads; ++thr_id) {
-    int virtual_gpu;
-
-    thr = mining_thr[thr_id];
-    cgpu = thr->cgpu;
-    if (cgpu->drv->drv_id != DRIVER_opencl)
-      continue;
-    if (dev_from_id(thr_id) != gpu)
-      continue;
-
-    virtual_gpu = cgpu->virtual_gpu;
-    /* Lose this ram cause we may get stuck here! */
-    //tq_freeze(thr->q);
-
-    thr->q = tq_new();
-    if (!thr->q)
-      quit(1, "Failed to tq_new in reinit_gpu");
-
-    /* Lose this ram cause we may dereference in the dying thread! */
-    //free(clState);
-
-    applog(LOG_INFO, "Reinit GPU thread %d", thr_id);
-    clStates[thr_id] = initCl(virtual_gpu, name, sizeof(name), &cgpu->algorithm);
-    if (!clStates[thr_id]) {
-      applog(LOG_ERR, "Failed to reinit GPU thread %d", thr_id);
-      goto select_cgpu;
-    }
-    applog(LOG_INFO, "initCl() finished. Found %s", name);
-
-    if (unlikely(thr_info_create(thr, NULL, miner_thread, thr))) {
-      applog(LOG_ERR, "thread %d create failed", thr_id);
-      return NULL;
-    }
-    applog(LOG_WARNING, "Thread %d restarted", thr_id);
-  }
-  rd_unlock(&mining_thr_lock);
-
-  cgtime(&now);
-  get_datestamp(cgpu->init, sizeof(cgpu->init), &now);
-
-  rd_lock(&mining_thr_lock);
-  for (thr_id = 0; thr_id < mining_threads; ++thr_id) {
-    thr = mining_thr[thr_id];
-    cgpu = thr->cgpu;
-    if (cgpu->drv->drv_id != DRIVER_opencl)
-      continue;
-    if (dev_from_id(thr_id) != gpu)
-      continue;
-
-    cgsem_post(&thr->sem);
-  }
-  rd_unlock(&mining_thr_lock);
-
-  goto select_cgpu;
-out:
-  return NULL;
-}
 
 /*****************************************************************************************/
 
@@ -1384,9 +597,10 @@ static void reinit_fpga_device(struct cgpu_info *gpu)
 static void get_fpga_statline_before(char *buf, size_t bufsiz, struct cgpu_info *gpu)
 {
 	float gt = 0.0f;
+	int fpga_clock = (1000 * 1000) * 250;
 
-	tailsprintf(buf, bufsiz, "%5.1fC ", gt);
-	tailsprintf(buf, bufsiz, "        ");
+	tailsprintf(buf, bufsiz, "%3.1fC | ", fpga_temp);
+	tailsprintf(buf, bufsiz, "%2dx %3d MHz ",fpga_cores, fpga_freq);
 	tailsprintf(buf, bufsiz, "| ");
 }
 
@@ -1558,8 +772,10 @@ static int64_t fpga_scanhash(struct thr_info *thr, struct work *work, int64_t __
 	info = &_info;
 
 	info->device_fd = fd;
-	info->Hs = 200;
-	info->timeout = 5;
+	info->Hs = 250000000 / 2400;
+
+	dev_timeout = 
+	info->timeout = 10;
 
 
 	// Send Data To FPGA
@@ -1600,7 +816,7 @@ static int64_t fpga_scanhash(struct thr_info *thr, struct work *work, int64_t __
 
 		if (ret == 0 && len != 8) {		// No Nonce Found
 			if (elapsed.tv_sec > info->timeout) {
-				applog(LOG_ERR, "%s%i: End Scan For Nonces - Time = %d sec", serial_fpga->drv->name, serial_fpga->device_id, elapsed.tv_sec);
+				applog(LOG_DEBUG, "%s%i: End Scan For Nonces - Time = %d sec", serial_fpga->drv->name, serial_fpga->device_id, elapsed.tv_sec);
 				//thr->work_restart = true;
 				break;
 			}
@@ -1613,15 +829,18 @@ static int64_t fpga_scanhash(struct thr_info *thr, struct work *work, int64_t __
 			break;
 		}
 
+		fpga_temp = ((((double)((buf[4] << 8) | buf[5])) * ((double)509.3140064f)) / 65536.0f) - 280.23087870f;
+		fpga_freq = buf[7] | ((buf[6] & 3) << 8);
+		fpga_cores = buf[6] >> 2;
+
 		memcpy((char *)&nonce, buf, 4);
 
 		nonce = swab32(nonce);
 
 		//		curr_hw_errors = serial_fpga->hw_errors;
 
-		applog(LOG_ERR, "%s%i: Nonce Found - %08X (%5.1fMhz)", serial_fpga->drv->name, serial_fpga->device_id, nonce, (double)(1 / (info->Hs * 1000000)));
+		applog(LOG_INFO, "%s%i: Nonce Found - %08X (%5.1fMhz)", serial_fpga->drv->name, serial_fpga->device_id, nonce, (double)(1 / (info->Hs * 1000000)));
 		submit_nonce(thr, work, nonce);
-		break;
 
 		// Update Hashrate
 		//		if (serial_fpga->hw_errors == curr_hw_errors)
@@ -1630,18 +849,18 @@ static int64_t fpga_scanhash(struct thr_info *thr, struct work *work, int64_t __
 	}
 
 
-	int hash_count = 200;// ((double)(elapsed.tv_sec) + ((double)(elapsed.tv_usec)) / ((double)1000000)) / info->Hs;
+	int hash_count =  ((double)(elapsed.tv_sec) + ((double)(elapsed.tv_usec)) / ((double)1000000)) / info->Hs;
 
 						 //	free_work(work);
-	return hash_count;
 
 
 	/* The amount of work scanned can fluctuate when intensity changes
 	* and since we do this one cycle behind, we increment the work more
 	* than enough to prevent repeating work */
-	work->blk.nonce += gpu->max_hashes;
+	work->blk.nonce += 31337;// gpu->max_hashes;
 
-	return 1000000/2300;
+	return hash_count;
+
 }
 
 static void fpga_thread_shutdown(struct thr_info *thr)
@@ -1655,7 +874,7 @@ static void fpga_thread_shutdown(struct thr_info *thr)
 struct device_drv opencl_drv = {
   /*.drv_id = */            DRIVER_opencl,
   /*.dname = */             "fpga",
-  /*.name = */              "FPG",
+  /*.name = */              "FPGA",
   /*.drv_detect = */        fpga_detect,
   /*.reinit_device = */     reinit_fpga_device,
   /*.get_statline_before =*/get_fpga_statline_before,

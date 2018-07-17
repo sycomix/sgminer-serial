@@ -631,7 +631,7 @@ struct pool *add_pool(void)
   // (which can cause serious issues with things like P2Pool)
   // to true by default - set it to what it should be - false
   // unless enabled explicitly.
-  pool->extranonce_subscribe = false;
+  pool->extranonce_subscribe = true;
 
   pool->description = "";
 
@@ -1514,18 +1514,9 @@ struct opt_table opt_config_table[] = {
   OPT_WITH_ARG("--gpu-fan",
       set_default_gpu_fan, NULL, NULL,
       "GPU fan percentage range - one value, range and/or comma separated list (e.g. 0-85,85,65)"),
-  OPT_WITH_ARG("--gpu-map",
-      set_gpu_map, NULL, NULL,
-      "Map OpenCL to ADL device order manually, paired CSV (e.g. 1:0,2:1 maps OpenCL 1 to ADL 0, 2 to 1)"),
   OPT_WITH_ARG("--gpu-memclock",
       set_default_gpu_memclock, NULL, NULL,
       "Set the GPU memory (over)clock in Mhz - one value for all or separate by commas for per card"),
-  OPT_WITH_ARG("--gpu-memdiff",
-      set_gpu_memdiff, NULL, NULL,
-      "Set a fixed difference in clock speed between the GPU and memory in auto-gpu mode"),
-  OPT_WITH_ARG("--gpu-powertune",
-      set_default_gpu_powertune, NULL, NULL,
-      "Set the GPU powertune percentage - one value for all or separate by commas for per card"),
   OPT_WITHOUT_ARG("--gpu-reorder",
       opt_set_bool, &opt_reorder,
       "Attempt to reorder GPU devices according to PCI Bus ID"),
@@ -1822,18 +1813,6 @@ struct opt_table opt_config_table[] = {
       set_int_0_to_9999, opt_show_intval, &opt_tcp_keepalive,
       opt_hidden),
 #endif
-  OPT_WITH_ARG("--temp-cutoff",
-      set_temp_cutoff, opt_show_intval, &opt_cutofftemp,
-      "Temperature which a device will be automatically disabled at, one value or comma separated list"),
-  OPT_WITH_ARG("--temp-hysteresis",
-      set_int_1_to_10, opt_show_intval, &opt_hysteresis,
-      "Set how much the temperature can fluctuate outside limits when automanaging speeds"),
-  OPT_WITH_ARG("--temp-overheat",
-      set_temp_overheat, opt_show_intval, &opt_overheattemp,
-      "Temperature which a device will be throttled at while automanaging fan and/or GPU, one value or comma separated list"),
-  OPT_WITH_ARG("--temp-target",
-      set_temp_target, opt_show_intval, &opt_targettemp,
-      "Temperature which a device should stay at while automanaging fan and/or GPU, one value or comma separated list"),
 #ifdef HAVE_CURSES
   OPT_WITHOUT_ARG("--text-only|-T",
       opt_set_invbool, &use_curses,
@@ -1852,9 +1831,6 @@ struct opt_table opt_config_table[] = {
   OPT_WITH_ARG("--user|--pool-user|-u",
       set_user, NULL, NULL,
       "Username for bitcoin JSON-RPC server"),
-  OPT_WITH_ARG("--vectors",
-      set_vector, NULL, NULL,
-      opt_hidden),
       /* All current kernels only support vectors=1 */
       /* "Override detected optimal vector (1, 2 or 4) - one value or comma separated list"), */
   OPT_WITHOUT_ARG("--verbose|-v",
@@ -6896,18 +6872,7 @@ static void apply_initial_gpu_settings(struct pool *pool)
   enable_devices();
 
   //recount the number of needed mining threads
-  #ifdef HAVE_ADL
-    if(!empty_string((opt = get_pool_setting(pool->gpu_threads, default_profile.gpu_threads))))
-      set_gpu_threads((char *)opt);
-
-    rd_lock(&devices_lock);
-    for (i = 0; i < total_devices; i++)
-      if (!opt_removedisabled || !opt_devs_enabled || devices_enabled[i])
-        needed_threads += devices[i]->threads;
-    rd_unlock(&devices_lock);
-  #else
     needed_threads = mining_threads;
-  #endif
 
   //bad thread count?
   if(needed_threads == 0)
@@ -7091,123 +7056,7 @@ static void apply_switcher_options(unsigned long options, struct pool *pool)
     }
   }
 
-  //lookup gap
-  if(opt_isset(options, SWITCHER_APPLY_LG))
-  {
-    if(!empty_string((opt = get_pool_setting(pool->lookup_gap, default_profile.lookup_gap))))
-      set_lookup_gap((char *)opt);
-  }
 
-  //raw intensity from pool
-  if(opt_isset(options, SWITCHER_APPLY_RAWINT))
-  {
-    applog(LOG_DEBUG, "Switching to rawintensity: pool = %s, default = %s", pool->rawintensity, default_profile.rawintensity);
-    opt = get_pool_setting(pool->rawintensity, default_profile.rawintensity);
-    applog(LOG_DEBUG, "rawintensity -> %s", opt);
-    set_rawintensity(opt);
-  }
-  //xintensity
-  else if(opt_isset(options, SWITCHER_APPLY_XINT))
-  {
-    applog(LOG_DEBUG, "Switching to xintensity: pool = %s, default = %s", pool->xintensity, default_profile.xintensity);
-    opt = get_pool_setting(pool->xintensity, default_profile.xintensity);
-    applog(LOG_DEBUG, "xintensity -> %s", opt);
-    set_xintensity(opt);
-  }
-  //intensity
-  else if(opt_isset(options, SWITCHER_APPLY_INT))
-  {
-    applog(LOG_DEBUG, "Switching to intensity: pool = %s, default = %s", pool->intensity, default_profile.intensity);
-    opt = get_pool_setting(pool->intensity, default_profile.intensity);
-    applog(LOG_DEBUG, "intensity -> %s", opt);
-    set_intensity(opt);
-  }
-  //default basic intensity
-  else if(opt_isset(options, SWITCHER_APPLY_INT8))
-  {
-    default_profile.intensity = strdup("8");
-    set_intensity(default_profile.intensity);
-  }
-
-  //shaders
-  if(opt_isset(options, SWITCHER_APPLY_SHADER))
-  {
-    if(!empty_string((opt = get_pool_setting(pool->shaders, default_profile.shaders))))
-      set_shaders((char *)opt);
-  }
-
-  //thread-concurrency
-  if(opt_isset(options, SWITCHER_APPLY_TC))
-  {
-    // neoscrypt - if not specified set TC to 0 so that TC will be calculated by intensity settings
-    if (pool->algorithm.type == ALGO_NEOSCRYPT) {
-      opt = ((empty_string(pool->thread_concurrency))?"0":get_pool_setting(pool->thread_concurrency, default_profile.thread_concurrency));
-    }
-    // otherwise use pool/profile setting or default to default profile setting
-    else {
-      opt = get_pool_setting(pool->thread_concurrency, default_profile.thread_concurrency);
-    }
-
-    if(!empty_string(opt)) {
-      set_thread_concurrency((char *)opt);
-    }
-  }
-
-  //worksize
-  if(opt_isset(options, SWITCHER_APPLY_WORKSIZE))
-  {
-    if(!empty_string((opt = get_pool_setting(pool->worksize, default_profile.worksize))))
-      set_worksize(opt);
-  }
-
-    //GPU clock
-    if(opt_isset(options, SWITCHER_APPLY_GPU_ENGINE))
-    {
-      if(!empty_string((opt = get_pool_setting(pool->gpu_engine, default_profile.gpu_engine))))
-        set_gpu_engine((char *)opt);
-    }
-
-    //GPU memory clock
-    if(opt_isset(options, SWITCHER_APPLY_GPU_MEMCLOCK))
-    {
-      if(!empty_string((opt = get_pool_setting(pool->gpu_memclock, default_profile.gpu_memclock))))
-        set_gpu_memclock((char *)opt);
-    }
-
-    //GPU fans
-    if(opt_isset(options, SWITCHER_APPLY_GPU_FAN))
-    {
-      if(!empty_string((opt = get_pool_setting(pool->gpu_fan, default_profile.gpu_fan))))
-        set_gpu_fan((char *)opt);
-    }
-
-    //GPU powertune
-    if(opt_isset(options, SWITCHER_APPLY_GPU_POWERTUNE))
-    {
-      if(!empty_string((opt = get_pool_setting(pool->gpu_powertune, default_profile.gpu_powertune))))
-        set_gpu_powertune((char *)opt);
-    }
-
-    //GPU vddc
-    if(opt_isset(options, SWITCHER_APPLY_GPU_VDDC))
-    {
-      if(!empty_string((opt = get_pool_setting(pool->gpu_vddc, default_profile.gpu_vddc))))
-        set_gpu_vddc((char *)opt);
-    }
-
-    //apply gpu settings
-    for (i = 0; i < nDevs; ++i) {
-      if(opt_isset(options, SWITCHER_APPLY_GPU_ENGINE))
-        set_engineclock(i, gpus[i].min_engine);
-      if(opt_isset(options, SWITCHER_APPLY_GPU_MEMCLOCK))
-        set_memoryclock(i, gpus[i].gpu_memclock);
-      if(opt_isset(options, SWITCHER_APPLY_GPU_FAN))
-        set_fanspeed(i, gpus[i].min_fan);
-      if(opt_isset(options, SWITCHER_APPLY_GPU_POWERTUNE))
-        set_powertune(i, gpus[i].gpu_powertune);
-      if(opt_isset(options, SWITCHER_APPLY_GPU_VDDC))
-        set_vddc(i, gpus[i].gpu_vddc);
-    }
 }
 
 static void mutex_unlock_cleanup_handler(void *mutex)
@@ -7490,22 +7339,7 @@ static void get_work_prepare_thread(struct thr_info *mythr, struct work *work)
       unsigned int n_threads = 0;
       pthread_t restart_thr;
 
-      #ifdef HAVE_ADL
-        //change gpu threads if needed
-        if(opt_isset(pool_switch_options, SWITCHER_APPLY_GT))
-        {
-          if(!empty_string((opt = get_pool_setting(work->pool->gpu_threads, default_profile.gpu_threads))))
-            set_gpu_threads(opt);
-        }
-
-        rd_lock(&devices_lock);
-        for (i = 0; i < total_devices; i++)
-          if (!opt_removedisabled || !opt_devs_enabled || devices_enabled[i])
-            n_threads += devices[i]->threads;
-        rd_unlock(&devices_lock);
-      #else
         n_threads = mining_threads;
-      #endif
 
       if (unlikely(pthread_create(&restart_thr, NULL, restart_mining_threads_thread, (void *) (intptr_t) n_threads)))
         quit(1, "restart_mining_threads create thread failed");
@@ -9680,8 +9514,8 @@ int main(int argc, char *argv[])
   thr->q = tq_new();
   if (!thr->q)
     quit(1, "tq_new failed for gpur_thr_id");
-  if (thr_info_create(thr, NULL, reinit_gpu, thr))
-    quit(1, "reinit_gpu thread create failed");
+//  if (thr_info_create(thr, NULL, reinit_gpu, thr))
+//    quit(1, "reinit_gpu thread create failed");
 
   /* Create API socket thread */
   api_thr_id = 5;

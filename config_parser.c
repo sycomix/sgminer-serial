@@ -939,45 +939,6 @@ void apply_defaults()
   applog(LOG_DEBUG, "Default Devices = %s", default_profile.devices);
   set_devices((char *)default_profile.devices);
 
-  //set raw intensity first
-  if (!empty_string(default_profile.rawintensity))
-    set_rawintensity(default_profile.rawintensity);
-  //then try xintensity
-  else if (!empty_string(default_profile.xintensity))
-    set_xintensity(default_profile.xintensity);
-  //then try intensity
-  else if (!empty_string(default_profile.intensity))
-    set_intensity(default_profile.intensity);
-
-  if (!empty_string(default_profile.lookup_gap))
-    set_lookup_gap((char *)default_profile.lookup_gap);
-
-  if (!empty_string(default_profile.thread_concurrency))
-    set_thread_concurrency(default_profile.thread_concurrency);
-
-  if (!empty_string(default_profile.gpu_engine))
-    set_gpu_engine(default_profile.gpu_engine);
-
-  if (!empty_string(default_profile.gpu_memclock))
-    set_gpu_memclock(default_profile.gpu_memclock);
-
-  if (!empty_string(default_profile.gpu_threads))
-    set_gpu_threads(default_profile.gpu_threads);
-
-  if (!empty_string(default_profile.gpu_fan))
-    set_gpu_fan(default_profile.gpu_fan);
-
-  if (!empty_string(default_profile.gpu_powertune))
-    set_gpu_powertune((char *)default_profile.gpu_powertune);
-
-  if (!empty_string(default_profile.gpu_vddc))
-    set_gpu_vddc((char *)default_profile.gpu_vddc);
-    
-  if (!empty_string(default_profile.shaders))
-    set_shaders((char *)default_profile.shaders);
-
-  if (!empty_string(default_profile.worksize))
-    set_worksize((char *)default_profile.worksize);
 }
 
 //apply profile settings to pools
