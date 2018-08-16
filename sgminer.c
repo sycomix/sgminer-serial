@@ -71,7 +71,8 @@ char *curly = ":D";
   #include <sys/wait.h>
 #endif
 
-char devpath[512];
+char devpath[8][512];
+
 int devbaud = 115200;
 int devtimeout = 1;
 
@@ -1382,18 +1383,26 @@ char *set_difficulty_multiplier(char *arg)
   return NULL;
 }
 
-static char *set_com_port(char *arg)
-{
-	sprintf(devpath, "\\\\.\\%s", arg);
-	applog(LOG_WARNING, "Setting devpath to: %s\n", devpath);
-	return NULL;
-}
+static char *set_com0_port(char *arg) { sprintf(devpath[0], "\\\\.\\%s", arg);	applog(LOG_WARNING, "Setting devpath0 to: %s\n", devpath[0]);	return NULL; }
+static char *set_com1_port(char *arg) { sprintf(devpath[1], "\\\\.\\%s", arg);	applog(LOG_WARNING, "Setting devpath0 to: %s\n", devpath[1]);	return NULL; }
+static char *set_com2_port(char *arg) { sprintf(devpath[2], "\\\\.\\%s", arg);	applog(LOG_WARNING, "Setting devpath0 to: %s\n", devpath[2]);	return NULL; }
+static char *set_com3_port(char *arg) { sprintf(devpath[3], "\\\\.\\%s", arg);	applog(LOG_WARNING, "Setting devpath0 to: %s\n", devpath[3]);	return NULL; }
+static char *set_com4_port(char *arg) { sprintf(devpath[4], "\\\\.\\%s", arg);	applog(LOG_WARNING, "Setting devpath0 to: %s\n", devpath[4]);	return NULL; }
+static char *set_com5_port(char *arg) { sprintf(devpath[5], "\\\\.\\%s", arg);	applog(LOG_WARNING, "Setting devpath0 to: %s\n", devpath[5]);	return NULL; }
+static char *set_com6_port(char *arg) { sprintf(devpath[6], "\\\\.\\%s", arg);	applog(LOG_WARNING, "Setting devpath0 to: %s\n", devpath[6]);	return NULL; }
+static char *set_com7_port(char *arg) { sprintf(devpath[7], "\\\\.\\%s", arg);	applog(LOG_WARNING, "Setting devpath0 to: %s\n", devpath[7]);	return NULL; }
 
 /* These options are available from config file or commandline */
 struct opt_table opt_config_table[] = {
-	OPT_WITH_ARG("--com",
-	set_com_port, NULL, NULL,
-	"Set COM port for FPGA"),
+
+	OPT_WITH_ARG("--com0", set_com0_port, NULL, NULL, "Set COM port for FPGA0"),
+	OPT_WITH_ARG("--com1", set_com1_port, NULL, NULL, "Set COM port for FPGA1"),
+	OPT_WITH_ARG("--com2", set_com2_port, NULL, NULL, "Set COM port for FPGA2"),
+	OPT_WITH_ARG("--com3", set_com3_port, NULL, NULL, "Set COM port for FPGA3"),
+	OPT_WITH_ARG("--com4", set_com4_port, NULL, NULL, "Set COM port for FPGA4"),
+	OPT_WITH_ARG("--com5", set_com5_port, NULL, NULL, "Set COM port for FPGA5"),
+	OPT_WITH_ARG("--com6", set_com6_port, NULL, NULL, "Set COM port for FPGA6"),
+	OPT_WITH_ARG("--com7", set_com7_port, NULL, NULL, "Set COM port for FPGA7"),
 
   OPT_WITH_ARG("--algorithm|--kernel|-k",
          set_default_algorithm, NULL, NULL,
@@ -9111,6 +9120,9 @@ int main(int argc, char *argv[])
   struct block *block;
   int i;
   char *s;
+
+  for(i=0;i<8;i++)
+	  memset(devpath[i], 0, 512);
 
   /* This dangerous function tramples random dynamically allocated
    * variables so do it before anything at all */

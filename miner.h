@@ -563,6 +563,7 @@ struct cgpu_info {
   char *name;  /* GPU family codename. */
   char *device_path;
   void *device_data;
+  int fd;
 
   enum dev_enable deven;
   int accepted;

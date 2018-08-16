@@ -40,9 +40,10 @@
 
 /* TODO: cleanup externals ********************/
 
-double fpga_temp = 0.0f;
-int fpga_freq = 0;
-int fpga_cores = 0;
+double fpga_vint[8];
+double fpga_temp[8];
+int fpga_freq[8];
+int fpga_cores[8];
 int dev_timeout;
 int fpga_clock;
 
@@ -569,24 +570,39 @@ int serial_recv(int fd, char *buf, size_t bufsize, size_t *readlen)
 	return(0);
 }
 
+extern char devpath[8][512];
+extern int devbaud;
+extern int devtimeout;
+
+
 //add one fpga manually for now
 static void fpga_detect(void)
 {
+	//detect FPGA cards
+
 	struct cgpu_info *cgpu;
 
 	opt_g_threads = 1;
 
 	opencl_drv.max_diff = 65536;
 
-	cgpu = &gpus[0];
-	cgpu->deven = DEV_ENABLED;
-	cgpu->drv = &opencl_drv;
-	cgpu->thr = NULL;
-	cgpu->device_id = 0;
-	cgpu->threads = opt_g_threads;
-	cgpu->virtual_gpu = 0;
-	cgpu->algorithm = default_profile.algorithm;
-	add_cgpu(cgpu);
+	int i;
+
+	for (i = 0; i < 8; i++) {
+		if (devpath[i][0]) {
+			cgpu = &gpus[i];
+			cgpu->deven = DEV_ENABLED;
+			cgpu->drv = &opencl_drv;
+			cgpu->thr = NULL;
+			cgpu->device_id = i;
+			cgpu->device_path = devpath[i];
+			cgpu->threads = opt_g_threads;
+			cgpu->virtual_gpu = i;
+			cgpu->algorithm = default_profile.algorithm;
+			add_cgpu(cgpu);
+			applog(LOG_WARNING, "fpga_detect(): adding %s", devpath[i]);
+		}
+	}
 }
 
 static void reinit_fpga_device(struct cgpu_info *gpu)
@@ -599,14 +615,14 @@ static void get_fpga_statline_before(char *buf, size_t bufsiz, struct cgpu_info 
 	float gt = 0.0f;
 	int fpga_clock = (1000 * 1000) * 250;
 
-	tailsprintf(buf, bufsiz, "%3.1fC | ", fpga_temp);
-	tailsprintf(buf, bufsiz, "%2dx %3d MHz ",fpga_cores, fpga_freq);
+	tailsprintf(buf, bufsiz, "%3.1fC %0.3fV | ", fpga_temp[gpu->device_id], fpga_vint[gpu->device_id]);
+	tailsprintf(buf, bufsiz, "%2dx %3d MHz ",fpga_cores[gpu->device_id], fpga_freq[gpu->device_id]);
 	tailsprintf(buf, bufsiz, "| ");
 }
 
 static void get_fpga_statline(char *buf, size_t bufsiz, struct cgpu_info *gpu)
 {
-	tailsprintf(buf, bufsiz, " I:%2d", gpu->intensity);
+//	tailsprintf(buf, bufsiz, " I:%2d", gpu->intensity);
 }
 
 static bool fpga_thread_prepare(struct thr_info *thr)
@@ -634,23 +650,25 @@ static bool fpga_thread_prepare(struct thr_info *thr)
 	return true;
 }
 
-extern char devpath[512];
-extern int devbaud;
-extern int devtimeout;
-extern int fd;
-
 static bool fpga_thread_init(struct thr_info *thr)
 {
 	struct cgpu_info *gpu = thr->cgpu;
+	int i;
 	int r;
+
+	for (i = 0; i < 8; i++) {
+		fpga_temp[0] = 0.0f;
+		fpga_cores[0] = 0;
+		fpga_freq[0] = 0;
+	}
 
 	thr->cgpu_data = 0;// thrdata;
 	gpu->status = LIFE_WELL;
 	gpu->device_last_well = time(NULL);
 	
-	fd = serial_open(devpath, devbaud, devtimeout, 1);
+	gpu->fd = serial_open(gpu->device_path, devbaud, devtimeout, 1);
 
-	return fd == 0 ? false : true;
+	return gpu->fd == 0 ? false : true;
 }
 
 static bool fpga_prepare_work(struct thr_info __maybe_unused *thr, struct work *work)
@@ -675,14 +693,8 @@ void bswap(unsigned char *b, int len)
 	while (len) {
 		unsigned char t[4];
 
-		t[0] = b[0];
-		t[1] = b[1];
-		t[2] = b[2];
-		t[3] = b[3];
-		b[0] = t[3];
-		b[1] = t[2];
-		b[2] = t[1];
-		b[3] = t[0];
+		t[0] = b[0];		t[1] = b[1];		t[2] = b[2];		t[3] = b[3];
+		b[0] = t[3];		b[1] = t[2];		b[2] = t[1];		b[3] = t[0];
 		b += 4;
 		len -= 4;
 	}
@@ -771,7 +783,7 @@ static int64_t fpga_scanhash(struct thr_info *thr, struct work *work, int64_t __
 	serial_fpga = thr->cgpu;
 	info = &_info;
 
-	info->device_fd = fd;
+	info->device_fd = gpu->fd;
 	info->Hs = 250000000 / 2400;
 
 	dev_timeout = 
@@ -780,7 +792,7 @@ static int64_t fpga_scanhash(struct thr_info *thr, struct work *work, int64_t __
 
 	// Send Data To FPGA
 	//	ret = write(fd, ob_bin, sizeof(ob_bin));
-	_write(fd, wbuf, 52);
+	_write(gpu->fd, wbuf, 52);
 
 	/*	if (ret != sizeof(ob_bin)) {
 	applog(LOG_ERR, "%s%i: Serial Send Error (ret=%d)", serial_fpga->drv->name, serial_fpga->device_id, ret);
@@ -808,7 +820,7 @@ static int64_t fpga_scanhash(struct thr_info *thr, struct work *work, int64_t __
 
 		// Check Serial Port For 1/10 Sec For Nonce  
 		//		ret = read(fd, nonce_buf, SERIAL_READ_SIZE);
-		ret = serial_recv(fd, (char*)buf, 8, &len);
+		ret = serial_recv(gpu->fd, (char*)buf, 8, &len);
 
 		// Calculate Elapsed Time
 		cgtime(&tv_end);
@@ -829,9 +841,10 @@ static int64_t fpga_scanhash(struct thr_info *thr, struct work *work, int64_t __
 			break;
 		}
 
-		fpga_temp = ((((double)((buf[4] << 8) | buf[5])) * ((double)509.3140064f)) / 65536.0f) - 280.23087870f;
-		fpga_freq = buf[7] | ((buf[6] & 3) << 8);
-		fpga_cores = buf[6] >> 2;
+		fpga_vint[gpu->device_id] = (((double)buf[5]) + (((double)buf[4]) * 256.0f)) / 65536.0f * 3.0f;
+		fpga_temp[gpu->device_id] = ((((double)((buf[6] << 8) | buf[7])) * ((double)509.3140064f)) / 65536.0f) - 280.23087870f;
+		fpga_freq[gpu->device_id] = buf[7] | ((buf[6] & 3) << 8);
+		fpga_cores[gpu->device_id] = buf[6] >> 2;
 
 		memcpy((char *)&nonce, buf, 4);
 
@@ -865,9 +878,11 @@ static int64_t fpga_scanhash(struct thr_info *thr, struct work *work, int64_t __
 
 static void fpga_thread_shutdown(struct thr_info *thr)
 {
-	if(fd)
-		_close(fd);
-	fd = 0;
+	struct cgpu_info *gpu = thr->cgpu;
+
+	if(gpu->fd)
+		_close(gpu->fd);
+	gpu->fd = 0;
 	thr->cgpu_data = NULL;
 }
 
