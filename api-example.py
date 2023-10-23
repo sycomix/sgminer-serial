@@ -21,11 +21,10 @@ def linesplit(socket):
 	buffer = socket.recv(4096)
 	done = False
 	while not done:
-		more = socket.recv(4096)
-		if not more:
-			done = True
-		else:
+		if more := socket.recv(4096):
 			buffer = buffer+more
+		else:
+			done = True
 	if buffer:
 		return buffer
 
